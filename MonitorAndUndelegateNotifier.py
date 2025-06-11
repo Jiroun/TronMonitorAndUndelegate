@@ -2,20 +2,16 @@ import time
 from datetime import datetime
 import pytz
 import requests
-from tronpy import Tron
-from tronpy.keys import PrivateKey
 
 class TronEnergyMonitor:
     def __init__(self, telegram_token, chat_id):
         self.telegram_token = telegram_token
         self.chat_id = chat_id
-        self.wallets = []  # List of {"address": ..., "private_key": ..., "notified": False}
-        self.client = Tron(network='mainnet')
+        self.wallets = []  # List of {"address": ..., "notified": False}
 
-    def add_wallet(self, address, private_key_hex):
+    def add_wallet(self, address):
         self.wallets.append({
             "address": address,
-            "private_key": PrivateKey(bytes.fromhex(private_key_hex)),
             "notified_energy_ready": False  # for available energy alert
         })
 
@@ -34,23 +30,6 @@ class TronEnergyMonitor:
         }
         response = requests.post(url, json=data)
         return response.json().get("delegatedResource", [])
-
-    def undelegate_energy(self, owner_private_key, receiver_address):
-        try:
-            txn = (
-                self.client.trx.undelegate_resource(
-                    owner=owner_private_key.public_key.to_base58check_address(),
-                    receiver=receiver_address,
-                    resource='ENERGY'
-                )
-                .build()
-                .sign(owner_private_key)
-            )
-            result = txn.broadcast().wait()
-            return result
-        except Exception as e:
-            print(f"[ERROR] Undelegation failed: {e}")
-            return None
 
     def get_energy_status(self, wallet_address):
         try:
@@ -77,24 +56,28 @@ class TronEnergyMonitor:
         except Exception as e:
             print(f"[ERROR] Telegram message failed: {e}")
 
-    def check_undelegations(self):
+    def check_expired_delegations(self):
         now_ms = int(datetime.now(pytz.utc).timestamp() * 1000)
         for wallet in self.wallets:
             address = wallet["address"]
-            private_key = wallet["private_key"]
             print(f"\n🔍 Checking wallet: {address}")
             to_accounts = self.get_to_accounts(address)
 
             for to in to_accounts:
                 delegations = self.get_delegation_details(address, to)
                 for entry in delegations:
-                    expired = entry.get("expire_time_for_energy", 0) < now_ms
-                    if expired:
-                        result = self.undelegate_energy(private_key, to)
-                        if result:
-                            msg = f"🔁 Energy undelegated from {to} to {address} (expired)."
-                            self.send_telegram(msg, silent=True)
-                            print(msg)
+                    expire_time = entry.get("expire_time_for_energy", 0)
+                    if expire_time < now_ms:
+                        expire_dt = datetime.fromtimestamp(expire_time / 1000, pytz.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+                        msg = (
+                            f"⚠️ Expired Energy Delegation!\n"
+                            f"Delegated from: {address}\n"
+                            f"To: {to}\n"
+                            f"Expired at: {expire_dt}\n"
+                            f"يرجى فك التفويض يدوياً."
+                        )
+                        self.send_telegram(msg, silent=True)
+                        print(msg)
 
     def check_energy_availability(self):
         for wallet in self.wallets:
@@ -118,12 +101,11 @@ class TronEnergyMonitor:
         print("🚀 Starting Tron Energy Monitor...")
         while True:
             try:
-                self.check_undelegations()
+                self.check_expired_delegations()
                 self.check_energy_availability()
             except Exception as e:
                 print(f"[ERROR] Main loop failed: {e}")
             time.sleep(interval_seconds)
-
 
 # === Example usage ===
 if __name__ == "__main__":
@@ -133,6 +115,6 @@ if __name__ == "__main__":
     monitor = TronEnergyMonitor(TELEGRAM_TOKEN, CHAT_ID)
 
     # Example wallet (replace with your real data)
-    monitor.add_wallet("TPx3ehU7mictyZX7sv4YU4eXfuwm888888", "PRIVATE_KEY")
+    monitor.add_wallet("TPx3ehU7mictyZX7sv4YU4eXfuwm888888")
 
     monitor.run()
